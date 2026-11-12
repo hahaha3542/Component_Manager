@@ -715,7 +715,7 @@ class BluetoothLabelPrintUiTest {
                     paper = M1TestPaperProfile(40f, 60f),
                     media = LabelMediaType.Gap,
                     profile = LabelPrinterProfile.GenericCpcl,
-                    onApply = { value, _ -> selectedPaper = value },
+                    onApply = { value, _, save -> selectedPaper = value; save() },
                     onDismiss = {},
                 )
             }
@@ -755,7 +755,7 @@ class BluetoothLabelPrintUiTest {
         setLabelContent { MaterialTheme {
             LabelPaperPickerSheet(
                 paper = current, media = LabelMediaType.Gap, profile = LabelPrinterProfile.GenericCpcl,
-                onApply = { paper, _ -> selectedPaper = paper }, onDismiss = {},
+                onApply = { paper, _, save -> selectedPaper = paper; save() }, onDismiss = {},
             )
         } }
         compose.onNodeWithText("Legacy size").performScrollTo().performClick()

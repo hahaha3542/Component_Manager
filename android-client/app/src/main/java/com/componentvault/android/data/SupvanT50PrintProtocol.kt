@@ -8,11 +8,14 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.SocketTimeoutException
 
+internal data class SupvanMaterial(val widthMm: Int, val heightMm: Int, val gapMm: Int)
+
 /** Wire layout verified against the supvan-cups T50 SPP protocol and raster reference. */
 internal object SupvanT50PrintProtocol {
     const val CheckDevice = 0x12
     const val InquiryStatus = 0x11
     const val StartPrint = 0x13
+    const val ReturnMaterial = 0x30
     const val BufferFull = 0x10
     const val NextCompressedBlock = 0x5c
     const val FrameSize = 512
@@ -23,6 +26,19 @@ internal object SupvanT50PrintProtocol {
     private const val RasterStart = 14
     private const val MarginRows = 1
     private const val Density = 4
+
+    // The 22-byte SPP reply header is followed by UID, material code, counter and geometry.
+    fun parseMaterial(response: ByteArray): SupvanMaterial? {
+        if (response.size < 43) return null
+        val uid = 22..28
+        if (uid.all { response.unsigned(it) == 0 } || uid.all { response.unsigned(it) == 255 }) return null
+        val width = response.unsigned(40)
+        val height = response.unsigned(41)
+        val gap = response.unsigned(42)
+        return SupvanMaterial(width, height, gap).takeIf {
+            width in 20..50 && height in 10..255 && gap != 255
+        }
+    }
 
     fun command(code: Int, parameter: Int = 0, secondParameter: Int = 0): ByteArray =
         byteArrayOf(0x7e, 0x5a, 12, 0, 0x10, 1, 0xaa.toByte(), code.toByte(), 0, 0, 0, 1, 0, 0, 0, 0).apply {
@@ -196,6 +212,12 @@ internal class SupvanT50PrintSession(
         }
         awaitStatus(30_000) { !it.printing && !it.busy && !it.bufferFull }
         progress("supvan_status=finished")
+    }
+
+    fun readMaterial(): SupvanMaterial? {
+        exchange(SupvanT50PrintProtocol.CheckDevice)
+        awaitStatus(6_000) { !it.busy && !it.printing }
+        return SupvanT50PrintProtocol.parseMaterial(exchange(SupvanT50PrintProtocol.ReturnMaterial))
     }
 
     private fun awaitStatus(timeout: Long, interval: Long = 100, done: (Status) -> Boolean) {

@@ -52,7 +52,7 @@ internal fun LabelPaperPickerSheet(
     paper: M1TestPaperProfile,
     media: LabelMediaType,
     profile: LabelPrinterProfile,
-    onApply: (M1TestPaperProfile, LabelMediaType) -> Unit,
+    onApply: (M1TestPaperProfile, LabelMediaType, () -> Unit) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -106,7 +106,7 @@ internal fun LabelPaperPickerSheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     OutlinedButton(
-                        onClick = { draft?.let { onApply(it, mediaType) } },
+                        onClick = { draft?.let { onApply(it, mediaType) {} } },
                         enabled = draft != null,
                         modifier = Modifier.weight(1f).testTag("label_paper_apply"),
                     ) { Text(stringResource(R.string.label_paper_use_once)) }
@@ -118,10 +118,11 @@ internal fun LabelPaperPickerSheet(
                                     it.offsetXmm.takeIf { offsetX != null },
                                     it.offsetYmm.takeIf { offsetY != null },
                                 )
-                                store.save(listOf(preset) + savedPapers.filterNot { saved ->
-                                    saved.name == preset.name
-                                })
-                                onApply(it, mediaType)
+                                onApply(it, mediaType) {
+                                    store.save(listOf(preset) + savedPapers.filterNot { saved ->
+                                        saved.name == preset.name
+                                    })
+                                }
                             }
                         },
                         enabled = canSave,

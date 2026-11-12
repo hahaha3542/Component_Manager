@@ -110,6 +110,13 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 private data class PrintableComponent(val id: String, val seed: ComponentLabelSeed)
+private data class PendingPaperChange(
+    val paper: M1TestPaperProfile,
+    val media: LabelMediaType,
+    val resetDesign: Boolean,
+    val overrideMaterial: Boolean,
+    val savePreset: () -> Unit,
+)
 private data class PreviewRequest(
     val seeds: List<ComponentLabelSeed>,
     val templateId: String,
@@ -205,7 +212,7 @@ internal fun BluetoothLabelPrintScreen(
     var draftDesignJson by rememberSaveable { mutableStateOf("{}") }
     var pendingTemplateId by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingTextTemplateId by rememberSaveable { mutableStateOf<String?>(null) }
-    var pendingPaper by remember { mutableStateOf<Pair<M1TestPaperProfile, LabelMediaType>?>(null) }
+    var pendingPaper by remember { mutableStateOf<PendingPaperChange?>(null) }
     val draftDesigns = remember(draftDesignJson) { readLabelDrafts(draftDesignJson) }
     var templateId by rememberSaveable(selectedInitialTemplateId) { mutableStateOf(selectedInitialTemplateId) }
     var textTemplateId by rememberSaveable(initialTextTemplateId) { mutableStateOf(initialTextTemplateId) }
@@ -427,6 +434,18 @@ internal fun BluetoothLabelPrintScreen(
     val savedAddresses = savedPrinters.mapTo(mutableSetOf()) { it.address }
     val selectedPairedPrinter = pairedByAddress[controller.selectedAddress]
     val selectedCandidate = selectedPairedPrinter?.takeIf(controller::canStartWithDevice)
+    val materialCandidate = selectedPairedPrinter.takeIf {
+        !hasQueue && activeProfile == LabelPrinterProfile.SupvanT50Pro
+    }
+    var attemptedMaterialRead by remember(materialCandidate?.address) { mutableStateOf(false) }
+    val readingMaterial = materialCandidate != null && controller.transport.busy
+    val materialReading = controller.transport.supvanMaterialReading
+    val detectedMaterial = materialReading?.takeIf { it.address == materialCandidate?.address }?.material
+    LaunchedEffect(materialCandidate?.address, showPrintView, editable, readingMaterial) {
+        if (materialCandidate != null && showPrintView && editable && !readingMaterial && !attemptedMaterialRead) {
+            attemptedMaterialRead = controller.transport.readSupvanMaterial(materialCandidate)
+        }
+    }
     val selectedSavedPrinter = savedPrinters.firstOrNull { it.address == controller.selectedAddress }
     val needsProtocol = controller.profileForNewQueue == null
     LaunchedEffect(selectedPairedPrinter) {
@@ -447,7 +466,7 @@ internal fun BluetoothLabelPrintScreen(
     val hasInvalidFontSize = !hasQueue && printDesigns.any { (sku, design) ->
         design.elements.any { "$sku:${it.id}" in invalidFontSizeInputs }
     }
-    val canCreate = editable && (if (draftFreeLabel != null) validFree
+    val canCreate = editable && !readingMaterial && (if (draftFreeLabel != null) validFree
         else validSelection && printDesigns.size == draftSelections.size) &&
         !needsProtocol && compatiblePaper && invalidGeometryFields.isEmpty() && !hasInvalidFontSize && !blankQr &&
         preview.request == previewRequest && preview.bitmap != null && previewError == null
@@ -461,7 +480,8 @@ internal fun BluetoothLabelPrintScreen(
         widthText = value.widthMm.toString()
         heightText = value.heightMm.toString()
         rotationText = value.rotationDegrees.toString()
-        controller.savePrintOffset(LabelPrintOffset(value.offsetXmm, value.offsetYmm))
+        val offset = LabelPrintOffset(value.offsetXmm, value.offsetYmm)
+        if (offset != printOffset) controller.savePrintOffset(offset)
         controller.selectMedia(media.id)
     }
 
@@ -477,6 +497,31 @@ internal fun BluetoothLabelPrintScreen(
         hasQueue -> LabelMediaType.fromId(queue.mediaType)
         activeProfile.supportsContinuous -> LabelMediaType.fromId(controller.selectedMediaType)
         else -> LabelMediaType.Gap
+    }
+    fun requestPaperChange(
+        next: M1TestPaperProfile,
+        nextMedia: LabelMediaType,
+        manual: Boolean,
+        savePreset: () -> Unit = {},
+    ) {
+        val resetDesign = paper != null && draftDesigns.isNotEmpty() &&
+            (paper.widthMm != next.widthMm || paper.heightMm != next.heightMm)
+        val overrideMaterial = manual && detectedMaterial != null && (paper != next || media != nextMedia)
+        if (resetDesign || overrideMaterial) {
+            pendingPaper = PendingPaperChange(next, nextMedia, resetDesign, overrideMaterial, savePreset)
+        } else {
+            applyPaper(next, nextMedia)
+            savePreset()
+        }
+    }
+    LaunchedEffect(materialReading) {
+        val current = paper
+        if (detectedMaterial != null && current != null && editable) {
+            requestPaperChange(current.copy(
+                widthMm = detectedMaterial.widthMm.toFloat(),
+                heightMm = detectedMaterial.heightMm.toFloat(),
+            ), LabelMediaType.Gap, manual = false)
+        }
     }
     val mediaName = stringResource(if (media == LabelMediaType.Gap) R.string.label_media_gap else R.string.label_media_continuous)
     val unknownPrinter = stringResource(R.string.bluetooth_label_print_unknown_device)
@@ -497,12 +542,9 @@ internal fun BluetoothLabelPrintScreen(
             paper = paper ?: queue.paper,
             media = media,
             profile = activeProfile,
-            onApply = { next, nextMedia ->
+            onApply = { next, nextMedia, savePreset ->
                 sheetPanel = null
-                if (paper != null && (paper.widthMm != next.widthMm || paper.heightMm != next.heightMm) &&
-                    draftDesigns.isNotEmpty()
-                ) pendingPaper = next to nextMedia
-                else applyPaper(next, nextMedia)
+                requestPaperChange(next, nextMedia, manual = true, savePreset = savePreset)
             },
             onDismiss = { sheetPanel = null },
         )
@@ -687,8 +729,23 @@ internal fun BluetoothLabelPrintScreen(
                     LabelSettingsRow(
                         stringResource(R.string.label_ui_paper),
                         paper?.let(::paperSummary)?.let { if (activeProfile.supportsContinuous) "$it · $mediaName" else it },
-                        testTag = "label_print_paper", enabled = editable,
+                        testTag = "label_print_paper", enabled = editable && !readingMaterial,
                     ) { sheetPanel = "paper" }
+                    if (materialCandidate != null) {
+                        val materialSummary = when {
+                            readingMaterial -> stringResource(R.string.label_supvan_material_reading)
+                            detectedMaterial != null -> stringResource(R.string.label_supvan_material_size,
+                                detectedMaterial.widthMm, detectedMaterial.heightMm, detectedMaterial.gapMm)
+                            attemptedMaterialRead -> stringResource(R.string.label_supvan_material_unavailable)
+                            else -> null
+                        }
+                        LabelSettingsRow(
+                            stringResource(R.string.label_supvan_material_read),
+                            materialSummary,
+                            testTag = "label_supvan_material_read",
+                            enabled = editable && !readingMaterial,
+                        ) { attemptedMaterialRead = controller.transport.readSupvanMaterial(materialCandidate) }
+                    }
                     LabelSettingsRow(
                         stringResource(R.string.bluetooth_label_print_copies),
                         stringResource(R.string.bluetooth_label_print_count, printCount),
@@ -697,7 +754,7 @@ internal fun BluetoothLabelPrintScreen(
                     LabelSettingsRow(
                         stringResource(R.string.label_editor_calibration),
                         stringResource(R.string.label_confirmation_offset_summary, printOffset.xMm, printOffset.yMm),
-                        testTag = "label_print_calibration", enabled = editable,
+                        testTag = "label_print_calibration", enabled = editable && !readingMaterial,
                     ) { sheetPanel = "calibration" }
                 }
                 if (!freeMode && singleComponent != null) TextButton(
@@ -985,8 +1042,10 @@ internal fun BluetoothLabelPrintScreen(
                     }
                 }
                 "calibration" -> LabelCalibrationFields(printOffset) { offset ->
-                    controller.savePrintOffset(offset)
                     sheetPanel = null
+                    paper?.let {
+                        requestPaperChange(it.copy(offsetXmm = offset.xMm, offsetYmm = offset.yMm), media, manual = true)
+                    }
                 }
                 "queue_preview" -> {
                     val label = previewFreeLabel?.title ?: previewSeed?.name.orEmpty()
@@ -1112,19 +1171,29 @@ internal fun BluetoothLabelPrintScreen(
             },
         )
     }
-    pendingPaper?.let { (value, mediaType) ->
+    pendingPaper?.let { change ->
         AlertDialog(
             onDismissRequest = { pendingPaper = null },
-            title = { Text(stringResource(R.string.label_ui_change_paper_title)) },
-            text = { Text(stringResource(R.string.label_ui_change_paper_warning)) },
+            title = { Text(stringResource(if (change.overrideMaterial) R.string.label_supvan_material_override
+                else R.string.label_ui_change_paper_title)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (change.overrideMaterial) Text(stringResource(R.string.label_supvan_material_override_warning))
+                    if (change.resetDesign) Text(stringResource(R.string.label_ui_change_paper_warning))
+                }
+            },
             confirmButton = { TextButton(onClick = {
-                applyPaper(value, mediaType)
-                draftDesignJson = "{}"
-                selectedElementId = null
-                invalidGeometryFields = arrayListOf()
-                invalidFontSizeInputs.clear()
+                applyPaper(change.paper, change.media)
+                change.savePreset()
+                if (change.resetDesign) {
+                    draftDesignJson = "{}"
+                    selectedElementId = null
+                    invalidGeometryFields = arrayListOf()
+                    invalidFontSizeInputs.clear()
+                }
                 pendingPaper = null
-            }) { Text(stringResource(R.string.label_editor_reset_confirm)) } },
+            }) { Text(stringResource(if (change.overrideMaterial) R.string.label_supvan_material_apply
+                else R.string.label_editor_reset_confirm)) } },
             dismissButton = { TextButton(onClick = { pendingPaper = null }) {
                 Text(stringResource(R.string.bluetooth_label_print_cancel))
             } },

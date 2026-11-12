@@ -7,9 +7,30 @@ import java.io.ByteArrayOutputStream
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class SupvanT50PrintProtocolTest {
+    @Test
+    fun readsRfidGeometryWithoutSendingAJobOrWritingToTheTag() {
+        val materialReply = reply(0x30, size = 57).apply {
+            this[22] = 4
+            this[40] = 40
+            this[41] = 60
+            this[42] = 3
+        }
+        val writes = ByteArrayOutputStream()
+        val session = SupvanT50PrintSession(
+            ByteArrayInputStream(reply(0x12) + reply(0x11, size = 20) + materialReply),
+            writes,
+        ) { true }
+        assertEquals(SupvanMaterial(40, 60, 3), session.readMaterial())
+        assertEquals(listOf(0x12, 0x11, 0x30), writes.toByteArray().toList().chunked(16).map { it[7].toInt() })
+        assertNull(SupvanT50PrintProtocol.parseMaterial(materialReply.copyOf(42)))
+        assertNull(SupvanT50PrintProtocol.parseMaterial(materialReply.copyOf().apply { this[22] = 0 }))
+        assertNull(SupvanT50PrintProtocol.parseMaterial(materialReply.copyOf().apply { this[40] = 60 }))
+    }
+
     @Test
     fun sendsThePrintJobOnlyAfterHandshakeAndReadyStatus() {
         val ready = reply(0x11, size = 20)

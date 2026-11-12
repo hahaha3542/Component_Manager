@@ -41,6 +41,8 @@ internal data class PrinterDeviceCandidate(
     val advertisedServices: List<String> = emptyList(),
 )
 
+internal data class SupvanMaterialReading(val address: String, val material: SupvanMaterial?)
+
 internal enum class PrinterProbeStatus {
     Idle, Scanning, ScanComplete, Connecting, Printing, Complete, BluetoothOff, Unsupported,
     PermissionRequired, ScanFailed, ConnectionFailed, TimedOut, Stopped,
@@ -131,6 +133,8 @@ internal class BluetoothPrinterDiagnostics(context: Context) {
     var status by mutableStateOf(PrinterProbeStatus.Idle)
         private set
     var report by mutableStateOf("")
+        private set
+    var supvanMaterialReading by mutableStateOf<SupvanMaterialReading?>(null)
         private set
     var printResult by mutableStateOf(M1TestPrintResult.None)
         private set
@@ -328,6 +332,49 @@ internal class BluetoothPrinterDiagnostics(context: Context) {
     /** Production labels always use the tested, normal label-end command. */
     fun printM1Label(candidate: PrinterDeviceCandidate, bitmap: Bitmap, paper: M1TestPaperProfile) =
         printM1Bitmap(candidate, bitmap, paper, M1FeedMode.Label, "m1_component_label")
+
+    fun readSupvanMaterial(candidate: PrinterDeviceCandidate): Boolean {
+        if (busy) return false
+        stopInternal(recordPrintInterruption = false)
+        supvanMaterialReading = null
+        report = "transport=supvan_t50_spp\nprobe=supvan_material\n"
+        try {
+            if (adapter?.isEnabled != true) {
+                status = PrinterProbeStatus.BluetoothOff
+                supvanMaterialReading = SupvanMaterialReading(candidate.address, null)
+                return true
+            }
+            status = PrinterProbeStatus.Connecting
+            val session = SppSession(generation, candidate.address, isPrint = false)
+            sppSession = session
+            Thread({
+                try {
+                    val connection = acquireM1Connection(candidate, session) ?: return@Thread
+                    scheduleSppDeadline(session, 13_000, "supvan_material")
+                    val material = SupvanT50PrintSession(connection.input, connection.output) {
+                        isCurrentSpp(session)
+                    }.readMaterial()
+                    postSpp(session) {
+                        supvanMaterialReading = SupvanMaterialReading(candidate.address, material)
+                        finish(PrinterProbeStatus.Complete, "supvan_material=${if (material == null) "unavailable" else "read"}")
+                    }
+                } catch (_: Exception) {
+                    postSpp(session) {
+                        supvanMaterialReading = SupvanMaterialReading(candidate.address, null)
+                        finish(PrinterProbeStatus.ConnectionFailed, "error=supvan_material_read_failed")
+                    }
+                } finally {
+                    cancelSppDeadline(session)
+                    session.sockets.closeCurrent()
+                    session.connection?.let(m1Connections::closeIfOwned)
+                }
+            }, "supvan-material").start()
+        } catch (_: RuntimeException) {
+            supvanMaterialReading = SupvanMaterialReading(candidate.address, null)
+            finish(PrinterProbeStatus.ConnectionFailed, "error=supvan_material_read_failed")
+        }
+        return true
+    }
 
     fun printSupvanLabel(candidate: PrinterDeviceCandidate, bitmap: Bitmap) {
         stopInternal(recordPrintInterruption = false)
